@@ -1,0 +1,949 @@
+{
+  "name": "Healthcare — Patient Registration Form",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "*"
+        ],
+        "additionalFields": {}
+      },
+      "id": "368db78f-6e51-4c9e-9e94-8c6b0991e127",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -720,
+        704
+      ],
+      "webhookId": "healthcare-gemini-webhook",
+      "credentials": {
+        "telegramApi": {
+          "id": "YyjfB0Yr7oJ94Uor",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const msg = $input.first().json;\nconst text   = (msg.message?.text || '').trim();\nconst chatId  = msg.message?.chat?.id;\nconst firstName = msg.message?.from?.first_name || 'User';\n\nif (!text || !chatId) throw new Error('No text or chatId found in message');\n\nreturn [{ json: { text, chatId, firstName } }];"
+      },
+      "id": "e6423739-c538-477c-a9b2-68643a042f8c",
+      "name": "Parse Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -368,
+        704
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.text }}",
+        "options": {
+          "systemMessage": "You are a Healthcare Analytics Assistant with access to a SQL Server database called db_ac6bde_healthcaredb.\n\nYour job:\n1. Understand the user question — it may be in Spanish or English\n2. Choose the most appropriate tool to answer it\n3. If no existing tool covers the question, use tool_custom_query to run a dynamic SELECT\n4. Format the response clearly for Telegram using ONLY HTML: <b> bold, <i> italic, <code> values\n5. NEVER use markdown (no asterisks, no underscores, no backticks)\n\n=== EXACT DATABASE SCHEMA ===\n\nTABLE: fact_hospitalization  (main fact table — one row per hospitalization)\n  hospitalization_id  INT IDENTITY PK\n  patient_name        NVARCHAR(150)\n  age                 SMALLINT\n  gender              NVARCHAR(10)       -- 'Male' or 'Female'\n  blood_type          NVARCHAR(5)        -- 'A+','A-','B+','B-','AB+','AB-','O+','O-'\n  room_number         SMALLINT\n  condition_id        INT FK → dim_medical_condition.condition_id\n  medication_id       INT FK → dim_medication.medication_id\n  insurer_id          INT FK → dim_insurer.insurer_id\n  admission_type_id   INT FK → dim_admission_type.admission_type_id\n  result_id           INT FK → dim_test_result.result_id\n  doctor_id           INT FK → dim_doctor.doctor_id\n  hospital_id         INT FK → dim_hospital.hospital_id\n  admission_date_id   INT FK → dim_date.date_id\n  discharge_date_id   INT FK → dim_date.date_id\n  billing_amount      DECIMAL(12,2)      -- patient billing in USD\n  length_of_stay      SMALLINT           -- days between admission and discharge\n\nINDEXES ON fact_hospitalization:\n  IX_fact_condition, IX_fact_insurer, IX_fact_admission_date,\n  IX_fact_hospital, IX_fact_admission_type\n\nTABLE: dim_medical_condition\n  condition_id   INT IDENTITY PK\n  condition_name NVARCHAR(100) UNIQUE\n  Values: 'Cancer', 'Diabetes', 'Obesity', 'Asthma', 'Hypertension', 'Arthritis'\n\nTABLE: dim_medication\n  medication_id   INT IDENTITY PK\n  medication_name NVARCHAR(100) UNIQUE\n  Values: 'Aspirin', 'Ibuprofen', 'Lipitor', 'Paracetamol', 'Penicillin'\n\nTABLE: dim_insurer\n  insurer_id   INT IDENTITY PK\n  insurer_name NVARCHAR(100) UNIQUE\n  Values: 'Aetna', 'Blue Cross', 'Cigna', 'Medicare', 'UnitedHealthcare'\n\nTABLE: dim_admission_type\n  admission_type_id   INT IDENTITY PK\n  admission_type_name NVARCHAR(50) UNIQUE\n  Values: 'Emergency', 'Urgent', 'Elective'\n\nTABLE: dim_test_result\n  result_id   INT IDENTITY PK\n  result_name NVARCHAR(50) UNIQUE\n  Values: 'Normal', 'Abnormal', 'Inconclusive'\n\nTABLE: dim_doctor\n  doctor_id   INT IDENTITY PK\n  doctor_name NVARCHAR(150) UNIQUE\n\nTABLE: dim_hospital\n  hospital_id   INT IDENTITY PK\n  hospital_name NVARCHAR(200) UNIQUE\n\nTABLE: dim_date\n  date_id        INT PK              -- format YYYYMMDD (e.g. 20220315)\n  full_date      DATE UNIQUE\n  year           SMALLINT\n  quarter        TINYINT             -- 1 to 4\n  month          TINYINT             -- 1 to 12\n  month_name     NVARCHAR(20)        -- 'January', 'February', ...\n  week_of_year   TINYINT\n  day_of_month   TINYINT\n  day_of_week    TINYINT             -- 1=Monday, 7=Sunday\n  day_name       NVARCHAR(20)        -- 'Monday', 'Tuesday', ...\n  is_weekend     BIT                 -- 1 if Saturday or Sunday\n\n=== SQL RULES FOR custom_query TOOL ===\n1. Always prefix tables: db_ac6bde_healthcaredb.dbo.table_name\n2. Always JOIN dimension tables — never filter directly by ID columns\n3. Add TOP 20 to any query that could return many rows\n4. Only SELECT — never INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, EXEC\n5. For percentages: CAST(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER() AS DECIMAL(5,1))\n6. For billing totals: CAST(SUM(billing_amount) AS DECIMAL(18,2))\n7. For averages: CAST(AVG(CAST(column AS FLOAT)) AS DECIMAL(10,2))\n8. To filter by date use: JOIN dim_date d ON f.admission_date_id = d.date_id WHERE d.year = 2022\n9. To filter by condition: JOIN dim_medical_condition c ON f.condition_id = c.condition_id WHERE c.condition_name = 'Cancer'\n\n=== RESPONSE FORMAT RULES ===\n- Start with a <b>bold title</b> that summarizes the answer\n- Use bullet points with • for multiple rows\n- Format numbers: billing with $ and commas, percentages with %\n- Add a brief <i>italic insight</i> at the end\n- Keep responses under 300 words\n- If the result is empty, say 'No records found for that filter'\n- For patient lists: show name, age, gender, condition, insurer, billing, stay days\n\n=== CRITICAL DATABASE NAME ===\nThe database name is ALWAYS: db_ac6bde_healthcaredb\nNEVER use 'HealthcareDB' — it does not exist and will cause an error.\nEvery query must use: db_ac6bde_healthcaredb.dbo.table_name\n"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -16,
+        704
+      ],
+      "id": "d8ca8f3c-c486-4d1a-a132-5edb1cd4ff60",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "model": "llama-3.3-70b-versatile",
+        "options": {
+          "temperature": 0.1
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        -16,
+        864
+      ],
+      "id": "a6700444-0de2-4462-98f3-a3e59d814a36",
+      "name": "Groq Chat Model",
+      "credentials": {
+        "groqApi": {
+          "id": "Hs0aStiwyOBOrP5e",
+          "name": "Groq account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Parse Message').item.json.chatId }}",
+        "text": "={{ $json.output }}",
+        "additionalFields": {
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "21a8a476-4dfa-48cd-9939-cda2a58e1895",
+      "name": "Send Telegram Message",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        384,
+        704
+      ],
+      "webhookId": "6b550082-2402-4376-8314-8aa593cc52d2",
+      "credentials": {
+        "telegramApi": {
+          "id": "YyjfB0Yr7oJ94Uor",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  COUNT(*) AS total_admissions,\n  CAST(SUM(f.billing_amount) AS DECIMAL(18,2)) AS total_billing,\n  CAST(AVG(f.billing_amount) AS DECIMAL(10,2)) AS avg_billing,\n  CAST(AVG(CAST(f.length_of_stay AS FLOAT)) AS DECIMAL(5,1)) AS avg_stay_days,\n  MIN(d.full_date) AS first_admission_date,\n  MAX(d.full_date) AS last_admission_date\nFROM db_ac6bde_healthcaredb.dbo.fact_hospitalization f\nJOIN db_ac6bde_healthcaredb.dbo.dim_date d ON f.admission_date_id = d.date_id"
+      },
+      "type": "n8n-nodes-base.microsoftSqlTool",
+      "typeVersion": 1.1,
+      "position": [
+        -16,
+        1040
+      ],
+      "id": "01ac859b-83b7-46fe-9273-39ac838fd985",
+      "name": "get_admissions_overview",
+      "credentials": {
+        "microsoftSql": {
+          "id": "Hs7FpUMUVuptS8Q9",
+          "name": "Microsoft SQL account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  i.insurer_name,\n  COUNT(*) AS admissions,\n  CAST(SUM(f.billing_amount) AS DECIMAL(18,2)) AS total_billing,\n  CAST(AVG(f.billing_amount) AS DECIMAL(10,2)) AS avg_billing\nFROM db_ac6bde_healthcaredb.dbo.fact_hospitalization f\nJOIN db_ac6bde_healthcaredb.dbo.dim_insurer i ON f.insurer_id = i.insurer_id\nGROUP BY i.insurer_name\nORDER BY total_billing DESC"
+      },
+      "type": "n8n-nodes-base.microsoftSqlTool",
+      "typeVersion": 1.1,
+      "position": [
+        128,
+        1040
+      ],
+      "id": "8aebcab5-9779-4314-80d5-2cb2d3195fbb",
+      "name": "get_billing_by_insurer",
+      "credentials": {
+        "microsoftSql": {
+          "id": "Hs7FpUMUVuptS8Q9",
+          "name": "Microsoft SQL account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  a.admission_type_name,\n  COUNT(*) AS total_admissions,\n  CAST(AVG(CAST(f.length_of_stay AS FLOAT)) AS DECIMAL(5,1)) AS avg_stay_days,\n  MIN(f.length_of_stay) AS min_days,\n  MAX(f.length_of_stay) AS max_days\nFROM db_ac6bde_healthcaredb.dbo.fact_hospitalization f\nJOIN db_ac6bde_healthcaredb.dbo.dim_admission_type a ON f.admission_type_id = a.admission_type_id\nGROUP BY a.admission_type_name\nORDER BY avg_stay_days DESC"
+      },
+      "type": "n8n-nodes-base.microsoftSqlTool",
+      "typeVersion": 1.1,
+      "position": [
+        272,
+        1040
+      ],
+      "id": "1ce607de-292a-4ef3-a1be-42a7fb425fd8",
+      "name": "get_avg_length_of_stay",
+      "credentials": {
+        "microsoftSql": {
+          "id": "Hs7FpUMUVuptS8Q9",
+          "name": "Microsoft SQL account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  r.result_name,\n  COUNT(*) AS total,\n  CAST(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER() AS DECIMAL(5,1)) AS percentage\nFROM db_ac6bde_healthcaredb.dbo.fact_hospitalization f\nJOIN db_ac6bde_healthcaredb.dbo.dim_test_result r ON f.result_id = r.result_id\nGROUP BY r.result_name\nORDER BY total DESC"
+      },
+      "type": "n8n-nodes-base.microsoftSqlTool",
+      "typeVersion": 1.1,
+      "position": [
+        416,
+        1040
+      ],
+      "id": "c1c91013-246b-49aa-b409-a95fa23553f1",
+      "name": "get_test_result_distribution",
+      "credentials": {
+        "microsoftSql": {
+          "id": "Hs7FpUMUVuptS8Q9",
+          "name": "Microsoft SQL account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT TOP 6\n  c.condition_name,\n  COUNT(*) AS admissions,\n  CAST(SUM(f.billing_amount) AS DECIMAL(18,2)) AS total_billing,\n  CAST(AVG(f.billing_amount) AS DECIMAL(10,2)) AS avg_billing,\n  CAST(AVG(CAST(f.length_of_stay AS FLOAT)) AS DECIMAL(5,1)) AS avg_stay_days\nFROM db_ac6bde_healthcaredb.dbo.fact_hospitalization f\nJOIN db_ac6bde_healthcaredb.dbo.dim_medical_condition c ON f.condition_id = c.condition_id\nGROUP BY c.condition_name\nORDER BY total_billing DESC"
+      },
+      "type": "n8n-nodes-base.microsoftSqlTool",
+      "typeVersion": 1.1,
+      "position": [
+        560,
+        1040
+      ],
+      "id": "b54d4f30-9f6d-4150-a516-794a134c145c",
+      "name": "get_top_conditions",
+      "credentials": {
+        "microsoftSql": {
+          "id": "Hs7FpUMUVuptS8Q9",
+          "name": "Microsoft SQL account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  r.result_name,\n  COUNT(*) AS total,\n  CAST(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER() AS DECIMAL(5,1)) AS percentage\nFROM db_ac6bde_healthcaredb.dbo.fact_hospitalization f\nJOIN db_ac6bde_healthcaredb.dbo.dim_test_result r ON f.result_id = r.result_id\nWHERE r.result_name IN ('Abnormal', 'Inconclusive')\nGROUP BY r.result_name\nUNION ALL\nSELECT\n  'Avg billing (Abnormal patients)' AS result_name,\n  0 AS total,\n  CAST(AVG(CASE WHEN r2.result_name = 'Abnormal' THEN f2.billing_amount END) AS DECIMAL(10,2)) AS percentage\nFROM db_ac6bde_healthcaredb.dbo.fact_hospitalization f2\nJOIN db_ac6bde_healthcaredb.dbo.dim_test_result r2 ON f2.result_id = r2.result_id"
+      },
+      "type": "n8n-nodes-base.microsoftSqlTool",
+      "typeVersion": 1.1,
+      "position": [
+        704,
+        1040
+      ],
+      "id": "71295968-e87f-47d3-8ab7-4917fb580ccd",
+      "name": "get_incidence_alert",
+      "credentials": {
+        "microsoftSql": {
+          "id": "Hs7FpUMUVuptS8Q9",
+          "name": "Microsoft SQL account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT TOP 20\n  f.patient_name,\n  f.age,\n  f.gender,\n  f.blood_type,\n  c.condition_name,\n  i.insurer_name,\n  a.admission_type_name,\n  r.result_name,\n  CAST(f.billing_amount AS DECIMAL(10,2)) AS billing_amount,\n  f.length_of_stay AS stay_days,\n  d.full_date AS admission_date\nFROM db_ac6bde_healthcaredb.dbo.fact_hospitalization f\nJOIN db_ac6bde_healthcaredb.dbo.dim_medical_condition c  ON f.condition_id      = c.condition_id\nJOIN db_ac6bde_healthcaredb.dbo.dim_insurer i            ON f.insurer_id        = i.insurer_id\nJOIN db_ac6bde_healthcaredb.dbo.dim_admission_type a     ON f.admission_type_id = a.admission_type_id\nJOIN db_ac6bde_healthcaredb.dbo.dim_test_result r        ON f.result_id         = r.result_id\nJOIN db_ac6bde_healthcaredb.dbo.dim_date d               ON f.admission_date_id = d.date_id\nORDER BY f.hospitalization_id DESC"
+      },
+      "type": "n8n-nodes-base.microsoftSqlTool",
+      "typeVersion": 1.1,
+      "position": [
+        848,
+        1040
+      ],
+      "id": "75acffdd-44ed-4feb-9ead-e5ee7b38cf54",
+      "name": "get_patients_list",
+      "credentials": {
+        "microsoftSql": {
+          "id": "Hs7FpUMUVuptS8Q9",
+          "name": "Microsoft SQL account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ $fromAI('query', 'Write a valid T-SQL SELECT query that answers the user question. IMPORTANT: always use db_ac6bde_healthcaredb.dbo.table_name — NEVER use HealthcareDB. Always JOIN dimension tables. Add TOP 20 to any query that could return many rows. Return only the SQL query, no explanations.') }}"
+      },
+      "type": "n8n-nodes-base.microsoftSqlTool",
+      "typeVersion": 1.1,
+      "position": [
+        992,
+        1040
+      ],
+      "id": "3322bdb5-d071-4165-9f3f-40c7afe6645a",
+      "name": "custom_query",
+      "credentials": {
+        "microsoftSql": {
+          "id": "Hs7FpUMUVuptS8Q9",
+          "name": "Microsoft SQL account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "DECLARE @condition_id      INT\nDECLARE @medication_id     INT\nDECLARE @insurer_id        INT\nDECLARE @admission_type_id INT\nDECLARE @result_id         INT\nDECLARE @doctor_id         INT\nDECLARE @hospital_id       INT\nDECLARE @admission_date_id INT\nDECLARE @discharge_date_id INT\n\nSELECT @condition_id      = condition_id      FROM db_ac6bde_healthcaredb.dbo.dim_medical_condition WHERE condition_name      = '{{ $json.cond }}'\nSELECT @medication_id     = medication_id     FROM db_ac6bde_healthcaredb.dbo.dim_medication        WHERE medication_name     = '{{ $json.med }}'\nSELECT @insurer_id        = insurer_id        FROM db_ac6bde_healthcaredb.dbo.dim_insurer           WHERE insurer_name        = '{{ $json.insurer }}'\nSELECT @admission_type_id = admission_type_id FROM db_ac6bde_healthcaredb.dbo.dim_admission_type   WHERE admission_type_name = '{{ $json.admType }}'\nSELECT @result_id         = result_id         FROM db_ac6bde_healthcaredb.dbo.dim_test_result       WHERE result_name         = '{{ $json.result }}'\nSELECT @admission_date_id = date_id           FROM db_ac6bde_healthcaredb.dbo.dim_date              WHERE date_id             = {{ $json.admDateId }}\nSELECT @discharge_date_id = date_id           FROM db_ac6bde_healthcaredb.dbo.dim_date              WHERE date_id             = {{ $json.disDateId }}\n\nIF NOT EXISTS (SELECT 1 FROM db_ac6bde_healthcaredb.dbo.dim_doctor   WHERE doctor_name   = '{{ $json.doctor }}')\n    INSERT INTO db_ac6bde_healthcaredb.dbo.dim_doctor   (doctor_name)   VALUES ('{{ $json.doctor }}')\nSELECT @doctor_id   = doctor_id   FROM db_ac6bde_healthcaredb.dbo.dim_doctor   WHERE doctor_name   = '{{ $json.doctor }}'\n\nIF NOT EXISTS (SELECT 1 FROM db_ac6bde_healthcaredb.dbo.dim_hospital WHERE hospital_name = '{{ $json.hospital }}')\n    INSERT INTO db_ac6bde_healthcaredb.dbo.dim_hospital (hospital_name) VALUES ('{{ $json.hospital }}')\nSELECT @hospital_id = hospital_id FROM db_ac6bde_healthcaredb.dbo.dim_hospital WHERE hospital_name = '{{ $json.hospital }}'\n\nSELECT\n  ISNULL(@condition_id,      -1) AS condition_id,\n  ISNULL(@medication_id,     -1) AS medication_id,\n  ISNULL(@insurer_id,        -1) AS insurer_id,\n  ISNULL(@admission_type_id, -1) AS admission_type_id,\n  ISNULL(@result_id,         -1) AS result_id,\n  ISNULL(@doctor_id,         -1) AS doctor_id,\n  ISNULL(@hospital_id,       -1) AS hospital_id,\n  ISNULL(@admission_date_id, -1) AS admission_date_id,\n  ISNULL(@discharge_date_id, -1) AS discharge_date_id"
+      },
+      "id": "69df8721-9964-45c9-8e01-2c21fa77420c",
+      "name": "Resolve FKs",
+      "type": "n8n-nodes-base.microsoftSql",
+      "typeVersion": 1,
+      "position": [
+        -288,
+        1408
+      ],
+      "credentials": {
+        "microsoftSql": {
+          "id": "Hs7FpUMUVuptS8Q9",
+          "name": "Microsoft SQL account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $input.first().json;\nconst v = $('Validate Fields1').first().json;\n\nconst checks = [\n  [r.condition_id,      'Medical condition not found: ' + v.cond],\n  [r.medication_id,     'Medication not found: ' + v.med],\n  [r.insurer_id,        'Insurance provider not found: ' + v.insurer],\n  [r.admission_type_id, 'Admission type not found: ' + v.admType],\n  [r.result_id,         'Test result not found: ' + v.result],\n  [r.doctor_id,         'Doctor could not be resolved: ' + v.doctor],\n  [r.hospital_id,       'Hospital could not be resolved: ' + v.hospital],\n  [r.admission_date_id, 'Admission date ' + v.admDate + ' (id: ' + v.admDateId + ') not found in calendar. Allowed range: 2019-01-01 to 2024-12-31.'],\n  [r.discharge_date_id, 'Discharge date ' + v.disDate + ' (id: ' + v.disDateId + ') not found in calendar. Allowed range: 2019-01-01 to 2024-12-31.'],\n];\n\nfor (const [id, msg] of checks) {\n  if (id === -1) throw new Error(msg);\n}\n\nreturn [{ json: {\n  condition_id:      r.condition_id,\n  medication_id:     r.medication_id,\n  insurer_id:        r.insurer_id,\n  admission_type_id: r.admission_type_id,\n  result_id:         r.result_id,\n  doctor_id:         r.doctor_id,\n  hospital_id:       r.hospital_id,\n  admission_date_id: r.admission_date_id,\n  discharge_date_id: r.discharge_date_id,\n  name:     v.name,\n  age:      v.age,\n  gender:   v.gender,\n  blood:    v.blood,\n  room:     v.room,\n  billing:  v.billing,\n  lengthOfStay: v.lengthOfStay\n} }];"
+      },
+      "id": "a179d0e9-8c96-4386-93b1-3f70e9054cbd",
+      "name": "Check FKs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        32,
+        1408
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO db_ac6bde_healthcaredb.dbo.fact_hospitalization (\n  patient_name, age, gender, blood_type, room_number,\n  condition_id, medication_id, insurer_id, admission_type_id,\n  result_id, doctor_id, hospital_id,\n  admission_date_id, discharge_date_id,\n  billing_amount, length_of_stay\n) VALUES (\n  '{{ $json.name }}',\n  {{ $json.age }},\n  '{{ $json.gender }}',\n  '{{ $json.blood }}',\n  {{ $json.room }},\n  {{ $json.condition_id }},\n  {{ $json.medication_id }},\n  {{ $json.insurer_id }},\n  {{ $json.admission_type_id }},\n  {{ $json.result_id }},\n  {{ $json.doctor_id }},\n  {{ $json.hospital_id }},\n  {{ $json.admission_date_id }},\n  {{ $json.discharge_date_id }},\n  {{ $json.billing }},\n  {{ $json.lengthOfStay }}\n)\n\nSELECT SCOPE_IDENTITY() AS new_hospitalization_id"
+      },
+      "id": "1c31c27c-e9e2-45cc-bfcf-f8cf40c29c30",
+      "name": "Final INSERT",
+      "type": "n8n-nodes-base.microsoftSql",
+      "typeVersion": 1,
+      "position": [
+        400,
+        1408
+      ],
+      "credentials": {
+        "microsoftSql": {
+          "id": "Hs7FpUMUVuptS8Q9",
+          "name": "Microsoft SQL account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const f = $input.first().json;\n\nconst errors = [];\n\nconst name     = (f['Full name']             || '').trim();\nconst age      = parseInt(f['Age'])          || 0;\nconst gender   = (f['Gender']               || '').trim();\nconst blood    = (f['Blood type']           || '').trim();\nconst cond     = (f['Medical condition']    || '').trim();\nconst med      = (f['Medication']           || '').trim();\nconst insurer  = (f['Insurance provider']   || '').trim();\nconst admType  = (f['Admission type']       || '').trim();\nconst result   = (f['Test result']          || '').trim();\nconst doctor   = (f['Doctor name']          || '').trim();\nconst hospital = (f['Hospital name']        || '').trim();\nconst room     = parseInt(f['Room number']) || 0;\nconst billing  = parseFloat(f['Billing amount (USD)']) || 0;\nconst admDateRaw = (f['Date of admission']  || '').trim();\nconst disDateRaw = (f['Date of discharge']  || '').trim();\n\nif (!name)                    errors.push('Full name is required');\nif (age < 1 || age > 120)     errors.push('Age must be between 1 and 120');\nif (!gender)                  errors.push('Gender is required');\nif (!blood)                   errors.push('Blood type is required');\nif (!cond)                    errors.push('Medical condition is required');\nif (!med)                     errors.push('Medication is required');\nif (!insurer)                 errors.push('Insurance provider is required');\nif (!admType)                 errors.push('Admission type is required');\nif (!result)                  errors.push('Test result is required');\nif (!doctor)                  errors.push('Doctor name is required');\nif (!hospital)                errors.push('Hospital name is required');\nif (room < 101 || room > 500) errors.push('Room number must be between 101 and 500');\nif (billing <= 0)             errors.push('Billing amount must be greater than 0');\nif (!admDateRaw)              errors.push('Date of admission is required');\nif (!disDateRaw)              errors.push('Date of discharge is required');\n\nif (errors.length > 0) throw new Error('Validation failed: ' + errors.join(' | '));\n\n// Safe date parsing — avoids UTC timezone shift\n// Handles: \"2022-03-15\", \"2022-03-15T00:00:00.000Z\", \"03/15/2022\", \"2022/03/15\"\nfunction parseDateParts(raw) {\n  const clean = raw.split('T')[0].trim();\n  let year, month, day;\n  if (clean.includes('-')) {\n    [year, month, day] = clean.split('-').map(Number);\n  } else if (clean.includes('/')) {\n    const parts = clean.split('/').map(Number);\n    if (parts[0] > 31) {\n      [year, month, day] = parts;\n    } else {\n      [month, day, year] = parts;\n    }\n  } else {\n    throw new Error('Unrecognized date format: ' + raw);\n  }\n  if (!year || !month || !day) throw new Error('Could not parse date: ' + raw);\n  return { year, month, day };\n}\n\nlet admParts, disParts;\ntry {\n  admParts = parseDateParts(admDateRaw);\n} catch(e) {\n  throw new Error('Invalid admission date: ' + admDateRaw + '. Use YYYY-MM-DD format.');\n}\ntry {\n  disParts = parseDateParts(disDateRaw);\n} catch(e) {\n  throw new Error('Invalid discharge date: ' + disDateRaw + '. Use YYYY-MM-DD format.');\n}\n\n// Build dateId as integer YYYYMMDD — no timezone conversion\nconst admDateId = admParts.year * 10000 + admParts.month * 100 + admParts.day;\nconst disDateId = disParts.year * 10000 + disParts.month * 100 + disParts.day;\n\n// Validate date range — dim_date must cover this range in SQL Server\nconst DATE_MIN = 20190101;\nconst DATE_MAX = 20301231;\n\nif (admDateId < DATE_MIN || admDateId > DATE_MAX) {\n  throw new Error(\n    'Admission date ' + admDateRaw +\n    ' is outside the allowed range (2019-01-01 to 2030-12-31).'\n  );\n}\nif (disDateId < DATE_MIN || disDateId > DATE_MAX) {\n  throw new Error(\n    'Discharge date ' + disDateRaw +\n    ' is outside the allowed range (2019-01-01 to 2030-12-31).'\n  );\n}\nif (disDateId < admDateId) {\n  throw new Error('Discharge date cannot be before admission date.');\n}\n\n// Calculate length of stay in days (no timezone — uses local date constructor)\nconst admDateObj = new Date(admParts.year, admParts.month - 1, admParts.day);\nconst disDateObj = new Date(disParts.year, disParts.month - 1, disParts.day);\nconst lengthOfStay = Math.round((disDateObj - admDateObj) / (1000 * 60 * 60 * 24));\n\n// Format dates as YYYY-MM-DD string for display and SQL\nconst admDate = admParts.year + '-' +\n  String(admParts.month).padStart(2, '0') + '-' +\n  String(admParts.day).padStart(2, '0');\nconst disDate = disParts.year + '-' +\n  String(disParts.month).padStart(2, '0') + '-' +\n  String(disParts.day).padStart(2, '0');\n\nreturn [{ json: {\n  name, age, gender, blood, cond, med, insurer,\n  admType, result, doctor, hospital,\n  room, billing, admDate, disDate,\n  lengthOfStay, admDateId, disDateId\n} }];"
+      },
+      "id": "84603267-730d-4fae-bbf2-18f6ec02710c",
+      "name": "Validate Fields1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -528,
+        1408
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all().map(i => i.json);\nconst newId = rows[0]?.new_hospitalization_id || 'N/A';\nconst data  = $('Validate Fields1').first().json;\n\nreturn [{ json: {\n  newId,\n  name:    data.name,\n  cond:    data.cond,\n  insurer: data.insurer,\n  admDate: data.admDate,\n  billing: data.billing,\n  lengthOfStay: data.lengthOfStay\n} }];"
+      },
+      "id": "c14f2ba1-9dc1-4323-be69-a499b3cecad1",
+      "name": "Prepare Success Data1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        48,
+        1296
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const err = $input.first().json;\nconst msg = err.message || err.error || 'Unknown error';\nreturn [{ json: { errorMessage: msg } }];"
+      },
+      "id": "780a1178-8e5f-4432-a0ac-afba71bde8c9",
+      "name": "Prepare Error Data1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -64,
+        1648
+      ]
+    },
+    {
+      "parameters": {
+        "formTitle": "Patient Registration",
+        "formDescription": "Complete all fields to register a new patient in the healthcare system.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Full name",
+              "placeholder": "e.g. John Smith",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Age",
+              "fieldType": "number",
+              "placeholder": "e.g. 35",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Gender",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Male"
+                  },
+                  {
+                    "option": "Female"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Blood type",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "A+"
+                  },
+                  {
+                    "option": "A-"
+                  },
+                  {
+                    "option": "B+"
+                  },
+                  {
+                    "option": "B-"
+                  },
+                  {
+                    "option": "AB+"
+                  },
+                  {
+                    "option": "AB-"
+                  },
+                  {
+                    "option": "O+"
+                  },
+                  {
+                    "option": "O-"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Medical condition",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Cancer"
+                  },
+                  {
+                    "option": "Diabetes"
+                  },
+                  {
+                    "option": "Obesity"
+                  },
+                  {
+                    "option": "Asthma"
+                  },
+                  {
+                    "option": "Hypertension"
+                  },
+                  {
+                    "option": "Arthritis"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Medication",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Aspirin"
+                  },
+                  {
+                    "option": "Ibuprofen"
+                  },
+                  {
+                    "option": "Lipitor"
+                  },
+                  {
+                    "option": "Paracetamol"
+                  },
+                  {
+                    "option": "Penicillin"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Insurance provider",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Aetna"
+                  },
+                  {
+                    "option": "Blue Cross"
+                  },
+                  {
+                    "option": "Cigna"
+                  },
+                  {
+                    "option": "Medicare"
+                  },
+                  {
+                    "option": "UnitedHealthcare"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Admission type",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Emergency"
+                  },
+                  {
+                    "option": "Urgent"
+                  },
+                  {
+                    "option": "Elective"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Test result",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Normal"
+                  },
+                  {
+                    "option": "Abnormal"
+                  },
+                  {
+                    "option": "Inconclusive"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Doctor name",
+              "placeholder": "e.g. Dr. Sarah Connor",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Hospital name",
+              "placeholder": "e.g. City General Hospital",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Room number",
+              "fieldType": "number",
+              "placeholder": "101 to 500",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Billing amount (USD)",
+              "fieldType": "number",
+              "placeholder": "e.g. 15000.00",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Date of admission",
+              "fieldType": "date",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Date of discharge",
+              "fieldType": "date",
+              "requiredField": true
+            }
+          ]
+        },
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "9bf48131-32be-4c3e-8018-b736c71594cd",
+      "name": "Patient Registration Form1",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        -768,
+        1408
+      ],
+      "webhookId": "5a912619-34ed-405c-8b40-e78c29e8c9a1"
+    },
+    {
+      "parameters": {
+        "chatId": "=5531842103",
+        "text": "Registro Exitoso!!!",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        256,
+        1280
+      ],
+      "id": "230807d0-4ecc-4000-8437-c3fcfae2caf4",
+      "name": "Send a text message",
+      "webhookId": "5d8c06ee-b815-46f9-900b-ef4015c33f23",
+      "credentials": {
+        "telegramApi": {
+          "id": "YyjfB0Yr7oJ94Uor",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "=5531842103",
+        "text": "Error al registrar!!!",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        144,
+        1664
+      ],
+      "id": "6e733da7-7201-420b-9773-a9c9c45b88d9",
+      "name": "Send a text message1",
+      "webhookId": "5d8c06ee-b815-46f9-900b-ef4015c33f23",
+      "credentials": {
+        "telegramApi": {
+          "id": "YyjfB0Yr7oJ94Uor",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "pinData": {
+    "Telegram Trigger": [
+      {
+        "json": {
+          "update_id": 269263476,
+          "message": {
+            "message_id": 194,
+            "from": {
+              "id": 5531842103,
+              "is_bot": false,
+              "first_name": "Yeins",
+              "last_name": "M",
+              "username": "Menfroyt",
+              "language_code": "es"
+            },
+            "chat": {
+              "id": 5531842103,
+              "first_name": "Yeins",
+              "last_name": "M",
+              "username": "Menfroyt",
+              "type": "private"
+            },
+            "date": 1773682308,
+            "text": "Quiero los pacientes con menor factura"
+          }
+        },
+        "pairedItem": {
+          "item": 0
+        }
+      }
+    ],
+    "Validate Fields1": [
+      {
+        "json": {
+          "name": "James Frank",
+          "age": 25,
+          "gender": "Male",
+          "blood": "A+",
+          "cond": "Diabetes",
+          "med": "Ibuprofen",
+          "insurer": "Aetna",
+          "admType": "Urgent",
+          "result": "Normal",
+          "doctor": "McGregor",
+          "hospital": "Essalu",
+          "room": 288,
+          "billing": 2000,
+          "admDate": "2026-03-16",
+          "disDate": "2026-03-18",
+          "lengthOfStay": 2,
+          "admDateId": 20260316,
+          "disDateId": 20260318
+        }
+      }
+    ],
+    "Patient Registration Form1": [
+      {
+        "json": {
+          "Full name": "James Frank",
+          "Age": 25,
+          "Gender": "Male",
+          "Blood type": "A+",
+          "Medical condition": "Diabetes",
+          "Medication": "Ibuprofen",
+          "Insurance provider": "Aetna",
+          "Admission type": "Urgent",
+          "Test result": "Normal",
+          "Doctor name": "McGregor",
+          "Hospital name": "Essalu",
+          "Room number": 288,
+          "Billing amount (USD)": 2000,
+          "Date of admission": "2026-03-16",
+          "Date of discharge": "2026-03-18",
+          "submittedAt": "2026-03-16T16:10:24.803-04:00",
+          "formMode": "test"
+        }
+      }
+    ]
+  },
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Parse Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Message": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Send Telegram Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "get_admissions_overview": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "get_billing_by_insurer": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "get_avg_length_of_stay": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "get_test_result_distribution": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "get_top_conditions": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "get_incidence_alert": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "get_patients_list": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "custom_query": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolve FKs": {
+      "main": [
+        [
+          {
+            "node": "Check FKs",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Prepare Error Data1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check FKs": {
+      "main": [
+        [
+          {
+            "node": "Final INSERT",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Prepare Error Data1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Final INSERT": {
+      "main": [
+        [
+          {
+            "node": "Prepare Success Data1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Prepare Error Data1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Fields1": {
+      "main": [
+        [
+          {
+            "node": "Resolve FKs",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Prepare Error Data1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Success Data1": {
+      "main": [
+        [
+          {
+            "node": "Send a text message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Patient Registration Form1": {
+      "main": [
+        [
+          {
+            "node": "Validate Fields1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Error Data1": {
+      "main": [
+        [
+          {
+            "node": "Send a text message1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false,
+    "timeSavedMode": "fixed",
+    "callerPolicy": "workflowsFromSameOwner",
+    "executionTimeout": -1
+  },
+  "versionId": "88456f47-1954-4152-86b1-211761b9cf16",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "76374cf0434f863a554b16b93532e18dedc56afbb95e9b1789b3a0a4e2b8b934"
+  },
+  "id": "Va2yxhgUre65WFFK",
+  "tags": []
+}
